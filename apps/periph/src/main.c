@@ -23,6 +23,7 @@
 #include "uart/uart.h"
 #include "minmea.h"
 #include "oled.h"
+#include "blesvc.h"
 
 static struct uart_dev *uart_dev;
 
@@ -158,6 +159,8 @@ uc_rx_char(void *arg, uint8_t byte)
     static char buf[MINMEA_MAX_LENGTH + 1];
     static uint8_t len = 0;
 
+    blesvc_rx_byte(byte);
+
     if (len == 0 && byte != '$') {
         return 0;
     }
@@ -286,6 +289,7 @@ main(void)
 
     uart_setup();
     oled_setup();
+    blesvc_setup();
 
     while (1) {
         os_eventq_run(os_eventq_dflt_get());

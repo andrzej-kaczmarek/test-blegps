@@ -20,3 +20,5 @@
 
 syscfg.vals:
     SPI_0_MASTER: 1
+    BLE_ROLE_OBSERVER: 0
+    BLE_ROLE_CENTRAL: 0
