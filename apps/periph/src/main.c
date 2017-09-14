@@ -22,6 +22,7 @@
 #include "os/os.h"
 #include "uart/uart.h"
 #include "minmea.h"
+#include "oled.h"
 
 static struct uart_dev *uart_dev;
 
@@ -44,6 +45,34 @@ static struct gps_info {
     struct minmea_float hdop;
     struct minmea_float vdop;
 } gps_info;
+
+static void update_oled_cb(struct os_event *ev);
+
+static struct os_event update_oled_ev = {
+    .ev_cb = update_oled_cb,
+};
+
+static void
+coord_to_dms(struct minmea_float *coord, int *deg, int *min, int *tsec, int *dir)
+{
+    const int scale = 1000;
+    int scaled_coord;
+
+    scaled_coord = minmea_rescale(coord, scale);
+
+    if (scaled_coord < 0) {
+        *dir = -1;
+        scaled_coord *= -1;
+    } else {
+        *dir = 1;
+    }
+
+    *deg = scaled_coord / (100 * scale);
+    scaled_coord -= *deg * (100 * scale);
+    *min = scaled_coord / scale;
+    scaled_coord -= *min * scale;
+    *tsec = 600 * scaled_coord / scale;
+}
 
 static int
 uc_tx_char(void *arg)
@@ -76,6 +105,7 @@ parse_nmea(const char *buf)
             gps_info.time = frame.gga.time;
             gps_info.altitude = frame.gga.altitude;
             gps_info.altitude_unit = frame.gga.altitude_units;
+            os_eventq_put(os_eventq_dflt_get(), &update_oled_ev);
         }
         break;
     case MINMEA_SENTENCE_GSA:
@@ -108,6 +138,7 @@ parse_nmea(const char *buf)
                 gps_info.sat_total = frame.gsv.total_sats;
                 memcpy(gps_info.sat_snr, gps_info.sat_snr_new,
                        sizeof(gps_info.sat_snr));
+                os_eventq_put(os_eventq_dflt_get(), &update_oled_ev);
             }
         }
         break;
@@ -119,8 +150,6 @@ parse_nmea(const char *buf)
     default:
         break;
     }
-
-    /* XXX: output data somewhere */
 }
 
 static int
@@ -166,12 +195,97 @@ uart_setup(void)
     }
 }
 
+static inline void
+draw_signal_bar(int val, bool active)
+{
+    static uint8_t d[7] = { 0xc0, 0xe0, 0xf0, 0xf8, 0xfc, 0xfe, 0xff };
+    uint8_t v;
+
+    oled_putd(0x00);
+
+    if (val < 0) {
+        v = 0;
+    } else if (val == 0) {
+        v = 0x80;
+    } else if (val > 99) {
+        v = 0xff;
+    } else {
+        val = 7 * val / 100;
+        v = d[val];
+    }
+
+    if (active) {
+        oled_putd(v);
+        oled_putd(v);
+        oled_putd(v);
+    } else {
+        oled_putd(0x00);
+        oled_putd(v);
+        oled_putd(0x00);
+    }
+}
+
+static void
+update_oled_cb(struct os_event *ev)
+{
+    struct gps_info gi;
+    int deg, min, tsec, dir;
+    int pdop, hdop, vdop;
+    int speed;
+    int altitude;
+    int sr;
+    int i;
+
+    OS_ENTER_CRITICAL(sr);
+    gi = gps_info;
+    OS_EXIT_CRITICAL(sr);
+
+    if (gi.fix_quality) {
+        speed = minmea_rescale(&gi.speed, 10);
+        altitude = minmea_rescale(&gi.altitude, 1);
+
+        coord_to_dms(&gps_info.lat, &deg, &min, &tsec, &dir);
+        oled_printfln(0, "%d\xf8%02d'%02d.%d\" %c %4d.%dK", deg, min, tsec / 10,
+                      tsec % 10, dir > 0 ? 'N' : 'S', speed / 10, speed % 10);
+
+        coord_to_dms(&gps_info.lon, &deg, &min, &tsec, &dir);
+        oled_printfln(1, "%d\xf8%02d'%02d.%d\" %c %6d%c", deg, min, tsec / 10,
+                      tsec % 10, dir > 0 ? 'E' : 'W', altitude,
+                      gi.altitude_unit);
+    } else {
+        oled_printfln(0, "--\xf8--'--.-\" -");
+        oled_printfln(1, "--\xf8--'--.-\" -");
+    }
+
+    oled_printfln(2, "%02d:%02d:%02d UTC", gi.time.hours, gi.time.minutes,
+                  gi.time.seconds);
+
+    oled_printfln(5, "sat %d/%d", gi.sat_tracked, gi.sat_total);
+
+    pdop = minmea_rescale(&gps_info.pdop, 10);
+    hdop = minmea_rescale(&gps_info.hdop, 10);
+    vdop = minmea_rescale(&gps_info.vdop, 10);
+    if (pdop < 100) {
+        oled_printfln(6, "DOP %d.%d  H%d.%d  V%d.%d", pdop / 10, pdop % 10,
+                      hdop / 10, hdop % 10, vdop / 10, vdop % 10);
+    } else {
+        oled_printfln(6, "DOP -.-  H-.-   V-.-");
+    }
+
+    oled_page(7);
+
+    for (i = 0; i < 32; i++) {
+        draw_signal_bar(gi.sat_snr[i], gi.sat_mask & (1 << i));
+    }
+}
+
 int
 main(void)
 {
     sysinit();
 
     uart_setup();
+    oled_setup();
 
     while (1) {
         os_eventq_run(os_eventq_dflt_get());
