@@ -32,6 +32,7 @@ static struct gps_info {
     int sat_total;
     int8_t sat_snr[32];
     int8_t sat_snr_new[32];
+    int8_t sat_snr_max;
     uint32_t sat_mask;
 
     struct minmea_time time;
@@ -199,7 +200,7 @@ uart_setup(void)
 }
 
 static inline void
-draw_signal_bar(int val, bool active)
+draw_signal_bar(int val, int max, bool active)
 {
     static uint8_t d[7] = { 0xc0, 0xe0, 0xf0, 0xf8, 0xfc, 0xfe, 0xff };
     uint8_t v;
@@ -213,7 +214,7 @@ draw_signal_bar(int val, bool active)
     } else if (val > 99) {
         v = 0xff;
     } else {
-        val = 7 * val / 100;
+        val = 7 * val / max;
         v = d[val];
     }
 
@@ -275,10 +276,16 @@ update_oled_cb(struct os_event *ev)
         oled_printfln(6, "DOP -.-  H-.-   V-.-");
     }
 
+    for (i = 0; i < 32; i++) {
+        if (gi.sat_snr[i] > gi.sat_snr_max) {
+            gi.sat_snr_max = gi.sat_snr[i];
+        }
+    }
+
     oled_page(7);
 
     for (i = 0; i < 32; i++) {
-        draw_signal_bar(gi.sat_snr[i], gi.sat_mask & (1 << i));
+        draw_signal_bar(gi.sat_snr[i], gi.sat_snr_max, gi.sat_mask & (1 << i));
     }
 }
 
