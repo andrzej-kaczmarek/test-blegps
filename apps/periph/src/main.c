@@ -21,32 +21,12 @@
 #include "bsp/bsp.h"
 #include "os/os.h"
 #include "uart/uart.h"
+#include "gps.h"
 #include "minmea.h"
 #include "oled.h"
 #include "blesvc.h"
 
 static struct uart_dev *uart_dev;
-
-static struct gps_info {
-    int sat_tracked;
-    int sat_total;
-    int8_t sat_snr[32];
-    int8_t sat_snr_new[32];
-    int8_t sat_snr_max;
-    uint32_t sat_mask;
-
-    struct minmea_time time;
-    int fix_quality;
-    struct minmea_float lon;
-    struct minmea_float lat;
-    struct minmea_float speed;
-    struct minmea_float altitude;
-    char altitude_unit;
-
-    struct minmea_float pdop;
-    struct minmea_float hdop;
-    struct minmea_float vdop;
-} gps_info;
 
 static void update_oled_cb(struct os_event *ev);
 
@@ -55,103 +35,31 @@ static struct os_event update_oled_ev = {
 };
 
 static void
-coord_to_dms(struct minmea_float *coord, int *deg, int *min, int *tsec, int *dir)
+coord_to_dms(int coord, int *deg, int *min, int *tsec, int *dir)
 {
-    const int scale = 1000;
-    int scaled_coord;
-
-    scaled_coord = minmea_rescale(coord, scale);
-
-    if (scaled_coord < 0) {
+    if (coord < 0) {
         *dir = -1;
-        scaled_coord *= -1;
+        coord *= -1;
     } else {
         *dir = 1;
     }
 
-    *deg = scaled_coord / (100 * scale);
-    scaled_coord -= *deg * (100 * scale);
-    *min = scaled_coord / scale;
-    scaled_coord -= *min * scale;
-    *tsec = 600 * scaled_coord / scale;
+    /*
+     * calculations below are base on an assumption that coord is a fixed point
+     * number stored as: DDMM.MMM
+     */
+
+    *deg = coord / 100000;
+    coord -= *deg * 100000;
+    *min = coord / 1000;
+    coord -= *min * 1000;
+    *tsec = 600 * coord / 1000;
 }
 
 static int
 uc_tx_char(void *arg)
 {
     return -1;
-}
-
-static void
-parse_nmea(const char *buf)
-{
-    static union {
-        struct minmea_sentence_gga gga;
-        struct minmea_sentence_gsa gsa;
-        struct minmea_sentence_gsv gsv;
-        struct minmea_sentence_vtg vtg;
-    } frame;
-    enum minmea_sentence_id id;
-    struct minmea_sat_info *si;
-    int i;
-
-    id = minmea_sentence_id(buf, false);
-
-    switch (id) {
-    case MINMEA_SENTENCE_GGA:
-        if (minmea_parse_gga(&frame.gga, buf)) {
-            gps_info.sat_tracked = frame.gga.satellites_tracked;
-            gps_info.fix_quality = frame.gga.fix_quality > 0;
-            gps_info.lon = frame.gga.longitude;
-            gps_info.lat = frame.gga.latitude;
-            gps_info.time = frame.gga.time;
-            gps_info.altitude = frame.gga.altitude;
-            gps_info.altitude_unit = frame.gga.altitude_units;
-            os_eventq_put(os_eventq_dflt_get(), &update_oled_ev);
-        }
-        break;
-    case MINMEA_SENTENCE_GSA:
-        if (minmea_parse_gsa(&frame.gsa, buf)) {
-            gps_info.sat_mask = 0;
-            for (i = 0; i < 12; i++) {
-                gps_info.sat_mask |= 1 << (frame.gsa.sats[i] - 1);
-            }
-
-            gps_info.pdop = frame.gsa.pdop;
-            gps_info.hdop = frame.gsa.hdop;
-            gps_info.vdop = frame.gsa.vdop;
-        }
-        break;
-    case MINMEA_SENTENCE_GSV:
-        if (minmea_parse_gsv(&frame.gsv, buf)) {
-            if (frame.gsv.msg_nr == 1) {
-                memset(gps_info.sat_snr_new, -1, sizeof(gps_info.sat_snr_new));
-            }
-
-            for (i = 0; i < 4; i++) {
-                si = &frame.gsv.sats[i];
-
-                if ((si->nr > 0) && (si->nr < 33)) {
-                    gps_info.sat_snr_new[si->nr - 1] = si->snr;
-                }
-            }
-
-            if (frame.gsv.msg_nr == frame.gsv.total_msgs) {
-                gps_info.sat_total = frame.gsv.total_sats;
-                memcpy(gps_info.sat_snr, gps_info.sat_snr_new,
-                       sizeof(gps_info.sat_snr));
-                os_eventq_put(os_eventq_dflt_get(), &update_oled_ev);
-            }
-        }
-        break;
-    case MINMEA_SENTENCE_VTG:
-        if (minmea_parse_vtg(&frame.vtg, buf)) {
-            gps_info.speed = frame.vtg.speed_kph;
-        }
-        break;
-    default:
-        break;
-    }
 }
 
 static int
@@ -174,7 +82,9 @@ uc_rx_char(void *arg, uint8_t byte)
 
     buf[len] = '\0';
 
-    parse_nmea(buf);
+    if (gps_parse_nmea(buf)) {
+        os_eventq_put(os_eventq_dflt_get(), &update_oled_ev);
+    }
 
     len = 0;
 
@@ -200,25 +110,26 @@ uart_setup(void)
 }
 
 static inline void
-draw_signal_bar(int val, int max, bool active)
+draw_signal_bar(const struct gps_sat_info *gsi, int max)
 {
     static uint8_t d[7] = { 0xc0, 0xe0, 0xf0, 0xf8, 0xfc, 0xfe, 0xff };
     uint8_t v;
 
     oled_putd(0x00);
 
-    if (val < 0) {
+    if (!gsi->present) {
         v = 0;
-    } else if (val == 0) {
+    } else if (gsi->snr == 0) {
+        /* draw at least single bar for present satellites */
         v = 0x80;
-    } else if (val > 99) {
+    } else if (gsi->snr > 99) {
+        /* draw full bar for anything out of range (if ever happened) */
         v = 0xff;
     } else {
-        val = 7 * val / max;
-        v = d[val];
+        v = d[7 * gsi->snr / (max + 1)];
     }
 
-    if (active) {
+    if (gsi->used) {
         oled_putd(v);
         oled_putd(v);
         oled_putd(v);
@@ -232,60 +143,45 @@ draw_signal_bar(int val, int max, bool active)
 static void
 update_oled_cb(struct os_event *ev)
 {
-    struct gps_info gi;
     int deg, min, tsec, dir;
-    int pdop, hdop, vdop;
-    int speed;
-    int altitude;
-    int sr;
     int i;
 
-    OS_ENTER_CRITICAL(sr);
-    gi = gps_info;
-    OS_EXIT_CRITICAL(sr);
+    gps_info_update();
 
-    if (gi.fix_quality) {
-        speed = minmea_rescale(&gi.speed, 10);
-        altitude = minmea_rescale(&gi.altitude, 1);
+    if (gps_info.fix_quality) {
+        coord_to_dms(gps_info.lat, &deg, &min, &tsec, &dir);
+        oled_printfln(0, "%d\xf8%02d'%02d.%d\" %c %4d.%dk",
+                      deg, min, tsec / 10, tsec % 10, dir > 0 ? 'N' : 'S',
+                      (int) gps_info.speed / 100,
+                      (int) gps_info.speed / 10 % 10);
 
-        coord_to_dms(&gps_info.lat, &deg, &min, &tsec, &dir);
-        oled_printfln(0, "%d\xf8%02d'%02d.%d\" %c %4d.%dK", deg, min, tsec / 10,
-                      tsec % 10, dir > 0 ? 'N' : 'S', speed / 10, speed % 10);
-
-        coord_to_dms(&gps_info.lon, &deg, &min, &tsec, &dir);
-        oled_printfln(1, "%d\xf8%02d'%02d.%d\" %c %6d%c", deg, min, tsec / 10,
-                      tsec % 10, dir > 0 ? 'E' : 'W', altitude,
-                      gi.altitude_unit);
+        coord_to_dms(gps_info.lon, &deg, &min, &tsec, &dir);
+        oled_printfln(1, "%d\xf8%02d'%02d.%d\" %c %6dm",
+                      deg, min, tsec / 10, tsec % 10, dir > 0 ? 'E' : 'W',
+                      (int) gps_info.altitude / 100);
     } else {
         oled_printfln(0, "--\xf8--'--.-\" -");
         oled_printfln(1, "--\xf8--'--.-\" -");
     }
 
-    oled_printfln(2, "%02d:%02d:%02d UTC", gi.time.hours, gi.time.minutes,
-                  gi.time.seconds);
+    oled_printfln(2, "%02d:%02d:%02d UTC", gps_info.time.hours,
+                  gps_info.time.minutes, gps_info.time.seconds);
 
-    oled_printfln(5, "sat %d/%d", gi.sat_tracked, gi.sat_total);
+    oled_printfln(5, "sat %d/%d", gps_info.sat_tracked, gps_info.sat_total);
 
-    pdop = minmea_rescale(&gps_info.pdop, 10);
-    hdop = minmea_rescale(&gps_info.hdop, 10);
-    vdop = minmea_rescale(&gps_info.vdop, 10);
-    if (pdop < 100) {
-        oled_printfln(6, "DOP %d.%d  H%d.%d  V%d.%d", pdop / 10, pdop % 10,
-                      hdop / 10, hdop % 10, vdop / 10, vdop % 10);
+    if (gps_info.pdop < 100) {
+        oled_printfln(6, "DOP %d.%d  H%d.%d  V%d.%d",
+                      gps_info.pdop / 10, gps_info.pdop % 10,
+                      gps_info.hdop / 10, gps_info.hdop % 10,
+                      gps_info.vdop / 10, gps_info.vdop % 10);
     } else {
         oled_printfln(6, "DOP -.-  H-.-   V-.-");
     }
 
-    for (i = 0; i < 32; i++) {
-        if (gi.sat_snr[i] > gi.sat_snr_max) {
-            gi.sat_snr_max = gi.sat_snr[i];
-        }
-    }
-
     oled_page(7);
 
-    for (i = 0; i < 32; i++) {
-        draw_signal_bar(gi.sat_snr[i], gi.sat_snr_max, gi.sat_mask & (1 << i));
+    for (i = 0; i < GPS_INFO_SAT_COUNT; i++) {
+        draw_signal_bar(&gps_info.sat[i], gps_info.sat_snr_max);
     }
 }
 
