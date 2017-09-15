@@ -28,6 +28,27 @@
 #include "host/ble_gap.h"
 #include "host/ble_uuid.h"
 #include "services/gap/ble_svc_gap.h"
+#include "gps.h"
+
+#define LNS_LAS_FLAG_SPEED                      0x0001
+#define LNS_LAS_FLAG_DISTANCE                   0x0002
+#define LNS_LAS_FLAG_LOCATION                   0x0004
+#define LNS_LAS_FLAG_ELEVATION                  0x0008
+#define LNS_LAS_FLAG_HEADING                    0x0010
+#define LNS_LAS_FLAG_ROLLING_TIME               0x0020
+#define LNS_LAS_FLAG_UTC_TIME                   0x0040
+#define LNS_LAS_FLAG_POS_NO                     0x0000
+#define LNS_LAS_FLAG_POS_OK                     0x0080
+#define LNS_LAS_FLAG_POS_EST                    0x0100
+#define LNS_LAS_FLAG_POS_LAST_KNOWN             0x0180
+#define LNS_LAS_FLAG_SPD_2D                     0x0000
+#define LNS_LAS_FLAG_SPD_3D                     0x0200
+#define LNS_LAS_FLAG_ELEVATION_SRC_GPS          0x0000
+#define LNS_LAS_FLAG_ELEVATION_SRC_BAROMETRIC   0x0400
+#define LNS_LAS_FLAG_ELEVATION_SRC_DATABASE     0x0800
+#define LNS_LAS_FLAG_ELEVATION_SRC_OTHER        0x0c00
+#define LNS_LAS_FLAG_HEADING_SRC_MOVEMENT       0x0000
+#define LNS_LAS_FLAG_HEADING_SRC_COMPASS        0x1000
 
 /* {6E400001-B5A3-F393-E0A9-E50E24DCCA9E} */
 static const ble_uuid128_t svc_uuid =
@@ -45,15 +66,26 @@ static const ble_uuid128_t chr_tx_uuid =
     BLE_UUID128_INIT(0x9e, 0xca, 0xdc, 0x24, 0x0e, 0xe5, 0xa9, 0xe0,
                      0x93, 0xf3, 0xa3, 0xb5, 0x03, 0x00, 0x40, 0x6e);
 
+#define LNS_UUID                        0x1819
+#define LNS_LN_FEATURE_UUID             0x2A6A
+#define LNS_LOCATION_AND_SPEED_UUID     0x2A67
+
 static uint16_t chr_tx_handle;
 
 static uint16_t chr_rx_handle;
 
+static uint16_t lns_las_handle;
+
 static uint16_t conn_handle;
+
+static struct os_callout lns_tx_timer;
 
 static void chr_notify_cb(struct os_event *ev);
 
 static int chr_access_cb(uint16_t conn_handle, uint16_t attr_handle,
+                              struct ble_gatt_access_ctxt *ctxt, void *arg);
+
+static int lns_access_cb(uint16_t conn_handle, uint16_t attr_handle,
                               struct ble_gatt_access_ctxt *ctxt, void *arg);
 
 static struct os_event chr_notify_ev = {
@@ -61,6 +93,26 @@ static struct os_event chr_notify_ev = {
 };
 
 static const struct ble_gatt_svc_def svc_def[] = {
+    {
+        /* Service: LNS */
+        .type = BLE_GATT_SVC_TYPE_PRIMARY,
+        .uuid = BLE_UUID16_DECLARE(LNS_UUID),
+        .characteristics = (struct ble_gatt_chr_def[]) { {
+            /* Characteristic: LN Feature */
+            .uuid = BLE_UUID16_DECLARE(LNS_LN_FEATURE_UUID),
+            .access_cb = lns_access_cb,
+            .flags = BLE_GATT_CHR_F_READ,
+        }, {
+            /* Characteristic: Location and Speed */
+            .uuid = BLE_UUID16_DECLARE(LNS_LOCATION_AND_SPEED_UUID),
+            .access_cb = lns_access_cb,
+            .val_handle = &lns_las_handle,
+            .flags = BLE_GATT_CHR_F_NOTIFY,
+        }, {
+            0, /* No more characteristics in this service */
+        } },
+    },
+
     {
         /* Service: uart */
         .type = BLE_GATT_SVC_TYPE_PRIMARY,
@@ -112,6 +164,25 @@ chr_access_cb(uint16_t conn_handle, uint16_t attr_handle,
     return 0;
 }
 
+static int
+lns_access_cb(uint16_t conn_handle, uint16_t attr_handle,
+                               struct ble_gatt_access_ctxt *ctxt, void *arg)
+{
+    static const uint32_t feat = htole32(0x0000000d); /* speed, location, elevation */
+    uint16_t uuid;
+
+    uuid = ble_uuid_u16(ctxt->chr->uuid);
+
+    switch (uuid) {
+    case LNS_LN_FEATURE_UUID:
+        assert(ctxt->op == BLE_GATT_ACCESS_OP_READ_CHR);
+        os_mbuf_append(ctxt->om, &feat, sizeof(feat));
+        break;
+    }
+
+    return 0;
+}
+
 static void start_advertise(void);
 
 static int
@@ -130,9 +201,66 @@ gap_event_cb(struct ble_gap_event *event, void *arg)
         conn_handle = 0xffff;
         start_advertise();
         break;
+
+    case BLE_GAP_EVENT_SUBSCRIBE:
+        if (event->subscribe.attr_handle == lns_las_handle) {
+            if (event->subscribe.cur_notify) {
+                os_callout_reset(&lns_tx_timer, OS_TICKS_PER_SEC);
+            } else {
+                os_callout_stop(&lns_tx_timer);
+            }
+        }
+        break;
     }
 
     return 0;
+}
+
+static inline int32_t
+coord_to_loc(int32_t coord)
+{
+    int d, m;
+
+    d = coord / 100000;
+    m = coord % 100000;
+
+    return d * 10000000 + m * 1000 / 6;
+}
+
+static void
+lns_tx_timer_exp(struct os_event *ev)
+{
+    struct {
+        uint16_t flags;
+        uint16_t speed;
+        int32_t lat;
+        int32_t lon;
+        uint8_t elevation[3];
+    } __attribute__((packed)) pkt;
+    int32_t elevation;
+    struct os_mbuf *om;
+
+    if (gps_info.fix_quality > 0) {
+        pkt.flags = htole16(LNS_LAS_FLAG_SPEED | LNS_LAS_FLAG_LOCATION |
+                            LNS_LAS_FLAG_POS_OK | LNS_LAS_FLAG_SPD_2D |
+                            LNS_LAS_FLAG_ELEVATION_SRC_GPS);
+
+        pkt.speed = htole16(gps_info.speed * 10 / 36);
+        pkt.lat = htole32(coord_to_loc(gps_info.lat));
+        pkt.lon = htole32(coord_to_loc(gps_info.lon));
+
+        elevation = htole32(gps_info.altitude);
+        memcpy(pkt.elevation, &elevation, 3);
+
+        om = ble_hs_mbuf_from_flat(&pkt, sizeof(pkt));
+    } else {
+        pkt.flags = htole16(LNS_LAS_FLAG_POS_NO);
+        om = ble_hs_mbuf_from_flat(&pkt, sizeof(pkt.flags));
+    }
+
+    ble_gattc_notify_custom(conn_handle, lns_las_handle, om);
+
+    os_callout_reset(&lns_tx_timer, OS_TICKS_PER_SEC);
 }
 
 static void
@@ -144,6 +272,9 @@ start_advertise(void)
 
     memset(&advf, 0, sizeof advf);
     advf.flags = BLE_HS_ADV_F_DISC_GEN | BLE_HS_ADV_F_BREDR_UNSUP;
+    advf.uuids16 = (ble_uuid16_t[]) { BLE_UUID16_INIT(LNS_UUID) };
+    advf.num_uuids16 = 1;
+    advf.uuids16_is_complete = 1;
     advf.uuids128 = (ble_uuid128_t *) &svc_uuid; /* const */
     advf.num_uuids128 = 1;
     advf.uuids128_is_complete = 1;
@@ -191,6 +322,9 @@ blesvc_setup(void)
     assert(rc == 0);
 
     conn_handle = 0xffff;
+
+    os_callout_init(&lns_tx_timer, os_eventq_dflt_get(), lns_tx_timer_exp,
+                    NULL);
 }
 
 void
