@@ -19,6 +19,7 @@
 # Package: apps/blegps
 
 syscfg.vals:
+    CONSOLE_UART: 0
     UART_0_PIN_TX: 33
     UART_0_PIN_RX: 34
     SPI_0_MASTER: 1
