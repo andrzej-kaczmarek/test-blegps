@@ -50,6 +50,18 @@
 #define LNS_LAS_FLAG_HEADING_SRC_MOVEMENT       0x0000
 #define LNS_LAS_FLAG_HEADING_SRC_COMPASS        0x1000
 
+#define LNS_PQ_FLAG_NUM_SAT_TRACKED             0x0001
+#define LNS_PQ_FLAG_NUM_SAT_TOTAL               0x0002
+#define LNS_PQ_FLAG_TIME_TO_FIRST_FIX           0x0004
+#define LNS_PQ_FLAG_EHPE                        0x0008
+#define LNS_PQ_FLAG_EVPE                        0x0010
+#define LNS_PQ_FLAG_HDOP                        0x0020
+#define LNS_PQ_FLAG_VDOP                        0x0040
+#define LNS_PQ_FLAG_POS_NO                      0x0000
+#define LNS_PQ_FLAG_POS_OK                      0x0080
+#define LNS_PQ_FLAG_POS_EST                     0x0100
+#define LNS_PQ_FLAG_POS_LAST_KNOWN              0x0180
+
 /* {6E400001-B5A3-F393-E0A9-E50E24DCCA9E} */
 static const ble_uuid128_t svc_uuid =
     BLE_UUID128_INIT(0x9e, 0xca, 0xdc, 0x24, 0x0e, 0xe5, 0xa9, 0xe0,
@@ -69,6 +81,7 @@ static const ble_uuid128_t chr_tx_uuid =
 #define LNS_UUID                        0x1819
 #define LNS_LN_FEATURE_UUID             0x2A6A
 #define LNS_LOCATION_AND_SPEED_UUID     0x2A67
+#define LNS_POSITION_QUALITY_UUID       0x2A69
 
 static uint16_t chr_tx_handle;
 
@@ -108,6 +121,11 @@ static const struct ble_gatt_svc_def svc_def[] = {
             .access_cb = lns_access_cb,
             .val_handle = &lns_las_handle,
             .flags = BLE_GATT_CHR_F_NOTIFY,
+        }, {
+            /* Characteristic: Position Quality */
+            .uuid = BLE_UUID16_DECLARE(LNS_POSITION_QUALITY_UUID),
+            .access_cb = lns_access_cb,
+            .flags = BLE_GATT_CHR_F_READ,
         }, {
             0, /* No more characteristics in this service */
         } },
@@ -168,7 +186,15 @@ static int
 lns_access_cb(uint16_t conn_handle, uint16_t attr_handle,
                                struct ble_gatt_access_ctxt *ctxt, void *arg)
 {
-    static const uint32_t feat = htole32(0x0000000d); /* speed, location, elevation */
+    /* speed, location, elevation, sat tracked/total, hdop, vdop, pos status */
+    static const uint32_t feat = htole32(0x00118c0d);
+    struct {
+        uint16_t flags;
+        uint8_t sat_tracked;
+        uint8_t sat_total;
+        uint8_t hdop;
+        uint8_t vdop;
+    } __attribute__((packed)) posq;
     uint16_t uuid;
 
     uuid = ble_uuid_u16(ctxt->chr->uuid);
@@ -177,6 +203,25 @@ lns_access_cb(uint16_t conn_handle, uint16_t attr_handle,
     case LNS_LN_FEATURE_UUID:
         assert(ctxt->op == BLE_GATT_ACCESS_OP_READ_CHR);
         os_mbuf_append(ctxt->om, &feat, sizeof(feat));
+        break;
+    case LNS_POSITION_QUALITY_UUID:
+        assert(ctxt->op == BLE_GATT_ACCESS_OP_READ_CHR);
+        if (gps_info.fix_quality > 0) {
+            posq.flags = htole16(LNS_PQ_FLAG_NUM_SAT_TRACKED |
+                                 LNS_PQ_FLAG_NUM_SAT_TOTAL |
+                                 LNS_PQ_FLAG_HDOP | LNS_PQ_FLAG_VDOP |
+                                 LNS_PQ_FLAG_POS_OK);
+
+            posq.sat_tracked = gps_info.sat_tracked;
+            posq.sat_total = gps_info.sat_total;
+            posq.hdop = gps_info.hdop / 2;
+            posq.vdop = gps_info.vdop / 2;
+
+            os_mbuf_append(ctxt->om, &posq, sizeof(posq));
+        } else {
+            posq.flags = htole16(LNS_PQ_FLAG_POS_NO);
+            os_mbuf_append(ctxt->om, &posq, sizeof(posq.flags));
+        }
         break;
     }
 
