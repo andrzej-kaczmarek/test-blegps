@@ -89,9 +89,9 @@ static uint16_t chr_rx_handle;
 
 static uint16_t lns_las_handle;
 
-static uint16_t conn_handle;
+static bool lns_las_notify;
 
-static struct os_callout lns_tx_timer;
+static uint16_t conn_handle;
 
 static void chr_notify_cb(struct os_event *ev);
 
@@ -249,11 +249,7 @@ gap_event_cb(struct ble_gap_event *event, void *arg)
 
     case BLE_GAP_EVENT_SUBSCRIBE:
         if (event->subscribe.attr_handle == lns_las_handle) {
-            if (event->subscribe.cur_notify) {
-                os_callout_reset(&lns_tx_timer, OS_TICKS_PER_SEC);
-            } else {
-                os_callout_stop(&lns_tx_timer);
-            }
+            lns_las_notify = event->subscribe.cur_notify;
         }
         break;
     }
@@ -270,42 +266,6 @@ coord_to_loc(int32_t coord)
     m = coord % 100000;
 
     return d * 10000000 + m * 1000 / 6;
-}
-
-static void
-lns_tx_timer_exp(struct os_event *ev)
-{
-    struct {
-        uint16_t flags;
-        uint16_t speed;
-        int32_t lat;
-        int32_t lon;
-        uint8_t elevation[3];
-    } __attribute__((packed)) pkt;
-    int32_t elevation;
-    struct os_mbuf *om;
-
-    if (gps_info.fix_quality > 0) {
-        pkt.flags = htole16(LNS_LAS_FLAG_SPEED | LNS_LAS_FLAG_LOCATION |
-                            LNS_LAS_FLAG_POS_OK | LNS_LAS_FLAG_SPD_2D |
-                            LNS_LAS_FLAG_ELEVATION_SRC_GPS);
-
-        pkt.speed = htole16(gps_info.speed * 10 / 36);
-        pkt.lat = htole32(coord_to_loc(gps_info.lat));
-        pkt.lon = htole32(coord_to_loc(gps_info.lon));
-
-        elevation = htole32(gps_info.altitude);
-        memcpy(pkt.elevation, &elevation, 3);
-
-        om = ble_hs_mbuf_from_flat(&pkt, sizeof(pkt));
-    } else {
-        pkt.flags = htole16(LNS_LAS_FLAG_POS_NO);
-        om = ble_hs_mbuf_from_flat(&pkt, sizeof(pkt.flags));
-    }
-
-    ble_gattc_notify_custom(conn_handle, lns_las_handle, om);
-
-    os_callout_reset(&lns_tx_timer, OS_TICKS_PER_SEC);
 }
 
 static void
@@ -367,9 +327,6 @@ blesvc_setup(void)
     assert(rc == 0);
 
     conn_handle = 0xffff;
-
-    os_callout_init(&lns_tx_timer, os_eventq_dflt_get(), lns_tx_timer_exp,
-                    NULL);
 }
 
 void
@@ -400,4 +357,41 @@ blesvc_rx_byte(uint8_t byte)
 
 done:
     len = 0;
+}
+
+void blesvc_notify(void)
+{
+    struct {
+        uint16_t flags;
+        uint16_t speed;
+        int32_t lat;
+        int32_t lon;
+        uint8_t elevation[3];
+    } __attribute__((packed)) pkt;
+    int32_t elevation;
+    struct os_mbuf *om;
+
+    if (!lns_las_notify) {
+        return;
+    }
+
+    if (gps_info.fix_quality > 0) {
+        pkt.flags = htole16(LNS_LAS_FLAG_SPEED | LNS_LAS_FLAG_LOCATION |
+                            LNS_LAS_FLAG_POS_OK | LNS_LAS_FLAG_SPD_2D |
+                            LNS_LAS_FLAG_ELEVATION_SRC_GPS);
+
+        pkt.speed = htole16(gps_info.speed * 10 / 36);
+        pkt.lat = htole32(coord_to_loc(gps_info.lat));
+        pkt.lon = htole32(coord_to_loc(gps_info.lon));
+
+        elevation = htole32(gps_info.altitude);
+        memcpy(pkt.elevation, &elevation, 3);
+
+        om = ble_hs_mbuf_from_flat(&pkt, sizeof(pkt));
+    } else {
+        pkt.flags = htole16(LNS_LAS_FLAG_POS_NO);
+        om = ble_hs_mbuf_from_flat(&pkt, sizeof(pkt.flags));
+    }
+
+    ble_gattc_notify_custom(conn_handle, lns_las_handle, om);
 }

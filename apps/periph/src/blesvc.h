@@ -28,6 +28,8 @@ void blesvc_setup(void);
 
 void blesvc_rx_byte(uint8_t byte);
 
+void blesvc_notify(void);
+
 #ifdef __cplusplus
 }
 #endif

@@ -28,11 +28,7 @@
 
 static struct uart_dev *uart_dev;
 
-static void update_oled_cb(struct os_event *ev);
-
-static struct os_event update_oled_ev = {
-    .ev_cb = update_oled_cb,
-};
+static struct os_callout update_timer;
 
 static void
 coord_to_dms(int coord, int *deg, int *min, int *tsec, int *dir)
@@ -82,9 +78,7 @@ uc_rx_char(void *arg, uint8_t byte)
 
     buf[len] = '\0';
 
-    if (gps_parse_nmea(buf)) {
-        os_eventq_put(os_eventq_dflt_get(), &update_oled_ev);
-    }
+    gps_parse_nmea(buf);
 
     len = 0;
 
@@ -141,12 +135,10 @@ draw_signal_bar(const struct gps_sat_info *gsi, int max)
 }
 
 static void
-update_oled_cb(struct os_event *ev)
+update_oled(void)
 {
     int deg, min, tsec, dir;
     int i;
-
-    gps_info_update();
 
     if (gps_info.fix_quality) {
         coord_to_dms(gps_info.lat, &deg, &min, &tsec, &dir);
@@ -185,6 +177,21 @@ update_oled_cb(struct os_event *ev)
     }
 }
 
+static void
+update_timer_exp(struct os_event *ev)
+{
+    os_time_t ticks;
+
+    ticks = os_time_get();
+
+    gps_info_update();
+
+    update_oled();
+    blesvc_notify();
+
+    os_callout_reset(&update_timer, OS_TICKS_PER_SEC - (os_time_get() - ticks));
+}
+
 int
 main(void)
 {
@@ -193,6 +200,11 @@ main(void)
     uart_setup();
     oled_setup();
     blesvc_setup();
+
+    os_callout_init(&update_timer, os_eventq_dflt_get(), update_timer_exp,
+                    NULL);
+
+    os_callout_reset(&update_timer, 0);
 
     while (1) {
         os_eventq_run(os_eventq_dflt_get());

@@ -61,7 +61,7 @@ struct gps_info {
 
 extern struct gps_info gps_info;
 
-bool gps_parse_nmea(const char *nmea_str);
+void gps_parse_nmea(const char *nmea_str);
 
 void gps_info_update(void);
 

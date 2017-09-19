@@ -44,7 +44,7 @@ static struct nmea_data {
 
 struct gps_info gps_info;
 
-bool
+void
 gps_parse_nmea(const char *nmea_str)
 {
     static union {
@@ -69,8 +69,6 @@ gps_parse_nmea(const char *nmea_str)
             nmea_data.time = frame.gga.time;
             nmea_data.altitude = frame.gga.altitude;
             assert(frame.gga.altitude_units == 'M');
-            /* new position info retrieved - can update */
-            return true;
         }
         break;
     case MINMEA_SENTENCE_GSA:
@@ -85,7 +83,6 @@ gps_parse_nmea(const char *nmea_str)
             nmea_data.pdop = frame.gsa.pdop;
             nmea_data.hdop = frame.gsa.hdop;
             nmea_data.vdop = frame.gsa.vdop;
-            /* no update here - we'll update with other info */
         }
         break;
     case MINMEA_SENTENCE_GSV:
@@ -106,22 +103,17 @@ gps_parse_nmea(const char *nmea_str)
                 nmea_data.sat_total = frame.gsv.total_sats;
                 memcpy(nmea_data.sat_snr, nmea_data.sat_snr_new,
                        sizeof(nmea_data.sat_snr));
-                /* complete information retrieved - can update */
-                return true;
             }
         }
         break;
     case MINMEA_SENTENCE_VTG:
         if (minmea_parse_vtg(&frame.vtg, nmea_str)) {
             nmea_data.speed = frame.vtg.speed_kph;
-            /* no update here - we'll update with other info */
         }
         break;
     default:
         break;
     }
-
-    return false;
 }
 
 void
