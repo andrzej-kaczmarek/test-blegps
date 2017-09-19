@@ -68,7 +68,7 @@ gps_parse_nmea(const char *nmea_str)
             nmea_data.lat = frame.gga.latitude;
             nmea_data.time = frame.gga.time;
             nmea_data.altitude = frame.gga.altitude;
-            assert(frame.gga.altitude_units == 'M');
+            assert(!frame.gga.fix_quality || frame.gga.altitude_units == 'M');
         }
         break;
     case MINMEA_SENTENCE_GSA:
