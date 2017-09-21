@@ -377,7 +377,8 @@ void blesvc_notify(void)
 
     if (gps_info.fix_quality > 0) {
         pkt.flags = htole16(LNS_LAS_FLAG_SPEED | LNS_LAS_FLAG_LOCATION |
-                            LNS_LAS_FLAG_POS_OK | LNS_LAS_FLAG_SPD_2D |
+                            LNS_LAS_FLAG_ELEVATION | LNS_LAS_FLAG_POS_OK |
+                            LNS_LAS_FLAG_SPD_2D |
                             LNS_LAS_FLAG_ELEVATION_SRC_GPS);
 
         pkt.speed = htole16(gps_info.speed * 10 / 36);
