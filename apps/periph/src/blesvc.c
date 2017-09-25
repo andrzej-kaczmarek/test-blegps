@@ -93,6 +93,8 @@ static bool lns_las_notify;
 
 static uint16_t conn_handle = 0xFFFF;
 
+static uint8_t conn_phy;
+
 static void chr_notify_cb(struct os_event *ev);
 
 static int chr_access_cb(uint16_t conn_handle, uint16_t attr_handle,
@@ -237,6 +239,8 @@ gap_event_cb(struct ble_gap_event *event, void *arg)
     case BLE_GAP_EVENT_CONNECT:
         if (event->connect.status == 0) {
             conn_handle = event->connect.conn_handle;
+            /* Start with 1M since we use legacy advertising */
+            conn_phy = BLE_GAP_LE_PHY_1M;
         } else {
             start_advertise();
         }
@@ -250,6 +254,13 @@ gap_event_cb(struct ble_gap_event *event, void *arg)
     case BLE_GAP_EVENT_SUBSCRIBE:
         if (event->subscribe.attr_handle == lns_las_handle) {
             lns_las_notify = event->subscribe.cur_notify;
+        }
+        break;
+
+    case BLE_GAP_EVENT_PHY_UPDATE_COMPLETE:
+        if ((event->phy_updated.status == 0) &&
+                            (event->phy_updated.conn_handle == conn_handle)) {
+            conn_phy = event->phy_updated.tx_phy;
         }
         break;
     }
@@ -327,6 +338,17 @@ blesvc_setup(void)
     assert(rc == 0);
 
     conn_handle = 0xffff;
+}
+
+uint16_t
+blesvc_get_conn_handle(void)
+{
+    return conn_handle;
+}
+
+uint8_t blesvc_get_conn_phy(void)
+{
+    return conn_phy;
 }
 
 void

@@ -20,6 +20,7 @@
 #include "sysinit/sysinit.h"
 #include "bsp/bsp.h"
 #include "os/os.h"
+#include "host/ble_gap.h"
 #include "uart/uart.h"
 #include "gps.h"
 #include "minmea.h"
@@ -134,6 +135,25 @@ draw_signal_bar(const struct gps_sat_info *gsi, int max)
     }
 }
 
+static const char *
+get_ble_state_str(void)
+{
+    if (blesvc_get_conn_handle() == 0xFFFF) {
+        return "--";
+    }
+
+    switch (blesvc_get_conn_phy()) {
+    case BLE_GAP_LE_PHY_1M:
+        return "1M";
+    case BLE_GAP_LE_PHY_2M:
+        return "2M";
+    case BLE_GAP_LE_PHY_CODED:
+        return "LR";
+    }
+
+    return "??";
+}
+
 static void
 update_oled(void)
 {
@@ -156,8 +176,9 @@ update_oled(void)
         oled_printfln(1, "--\xf8--'--.-\" -");
     }
 
-    oled_printfln(2, "%02d:%02d:%02d UTC", gps_info.time.hours,
-                  gps_info.time.minutes, gps_info.time.seconds);
+    oled_printfln(2, "%02d:%02d:%02d UTC     \xff %s", gps_info.time.hours,
+                  gps_info.time.minutes, gps_info.time.seconds,
+                  get_ble_state_str());
 
     oled_printfln(5, "sat %d/%d", gps_info.sat_tracked, gps_info.sat_total);
 

@@ -26,6 +26,10 @@ extern "C" {
 
 void blesvc_setup(void);
 
+uint16_t blesvc_get_conn_handle(void);
+
+uint8_t blesvc_get_conn_phy(void);
+
 void blesvc_rx_byte(uint8_t byte);
 
 void blesvc_notify(void);
