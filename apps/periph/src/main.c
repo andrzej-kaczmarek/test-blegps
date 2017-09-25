@@ -20,6 +20,7 @@
 #include "sysinit/sysinit.h"
 #include "bsp/bsp.h"
 #include "os/os.h"
+#include "hal/hal_gpio.h"
 #include "host/ble_gap.h"
 #include "uart/uart.h"
 #include "gps.h"
@@ -27,9 +28,16 @@
 #include "oled.h"
 #include "blesvc.h"
 
+#define APP_BUTTON_1M       1
+#define APP_BUTTON_2M       2
+#define APP_BUTTON_CODED2   3
+#define APP_BUTTON_CODED8   4
+
 static struct uart_dev *uart_dev;
 
 static struct os_callout update_timer;
+
+static struct os_event change_phy_ev;
 
 static void
 coord_to_dms(int coord, int *deg, int *min, int *tsec, int *dir)
@@ -51,6 +59,71 @@ coord_to_dms(int coord, int *deg, int *min, int *tsec, int *dir)
     *min = coord / 1000;
     coord -= *min * 1000;
     *tsec = 600 * coord / 1000;
+}
+
+static void
+change_phy(struct os_event *ev)
+{
+    uint16_t conn_handle;
+    int button;
+    int sr;
+
+    conn_handle = blesvc_get_conn_handle();
+    if (conn_handle == 0xffff) {
+        return;
+    }
+
+    OS_ENTER_CRITICAL(sr);
+    button = (int)ev->ev_arg;
+    OS_EXIT_CRITICAL(sr);
+
+    switch (button) {
+    case APP_BUTTON_1M:
+        ble_gap_set_prefered_le_phy(conn_handle, BLE_GAP_LE_PHY_1M_MASK,
+                                    BLE_GAP_LE_PHY_1M_MASK,
+                                    BLE_GAP_LE_PHY_CODED_ANY);
+        break;
+    case APP_BUTTON_2M:
+        ble_gap_set_prefered_le_phy(conn_handle, BLE_GAP_LE_PHY_2M_MASK,
+                                    BLE_GAP_LE_PHY_2M_MASK,
+                                    BLE_GAP_LE_PHY_CODED_ANY);
+        break;
+    case APP_BUTTON_CODED2:
+        ble_gap_set_prefered_le_phy(conn_handle, BLE_GAP_LE_PHY_CODED_MASK,
+                                    BLE_GAP_LE_PHY_CODED_MASK,
+                                    BLE_GAP_LE_PHY_CODED_S2);
+        break;
+    case APP_BUTTON_CODED8:
+        ble_gap_set_prefered_le_phy(conn_handle, BLE_GAP_LE_PHY_CODED_MASK,
+                                    BLE_GAP_LE_PHY_CODED_MASK,
+                                    BLE_GAP_LE_PHY_CODED_S8);
+        break;
+    }
+}
+
+static void
+gpio_irq_handler(void *arg)
+{
+    change_phy_ev.ev_arg = arg;
+    os_eventq_put(os_eventq_dflt_get(), &change_phy_ev);
+}
+
+static void
+gpio_setup(void)
+{
+    hal_gpio_irq_init(BUTTON_1, gpio_irq_handler, (void *)APP_BUTTON_1M,
+                      HAL_GPIO_TRIG_FALLING, HAL_GPIO_PULL_UP);
+    hal_gpio_irq_init(BUTTON_2, gpio_irq_handler, (void *)APP_BUTTON_2M,
+                      HAL_GPIO_TRIG_FALLING, HAL_GPIO_PULL_UP);
+    hal_gpio_irq_init(BUTTON_3, gpio_irq_handler, (void *)APP_BUTTON_CODED2,
+                      HAL_GPIO_TRIG_FALLING, HAL_GPIO_PULL_UP);
+    hal_gpio_irq_init(BUTTON_4, gpio_irq_handler, (void *)APP_BUTTON_CODED8,
+                      HAL_GPIO_TRIG_FALLING, HAL_GPIO_PULL_UP);
+
+    hal_gpio_irq_enable(BUTTON_1);
+    hal_gpio_irq_enable(BUTTON_2);
+    hal_gpio_irq_enable(BUTTON_3);
+    hal_gpio_irq_enable(BUTTON_4);
 }
 
 static int
@@ -218,9 +291,12 @@ main(void)
 {
     sysinit();
 
+    gpio_setup();
     uart_setup();
     oled_setup();
     blesvc_setup();
+
+    change_phy_ev.ev_cb = change_phy;
 
     os_callout_init(&update_timer, os_eventq_dflt_get(), update_timer_exp,
                     NULL);
