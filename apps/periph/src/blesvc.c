@@ -91,7 +91,7 @@ static uint16_t lns_las_handle;
 
 static bool lns_las_notify;
 
-static uint16_t conn_handle;
+static uint16_t conn_handle = 0xFFFF;
 
 static void chr_notify_cb(struct os_event *ev);
 
