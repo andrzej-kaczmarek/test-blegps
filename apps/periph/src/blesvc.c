@@ -87,6 +87,8 @@ static uint16_t chr_tx_handle;
 
 static uint16_t chr_rx_handle;
 
+static bool nuart_tx_notify;
+
 static uint16_t lns_las_handle;
 
 static bool lns_las_notify;
@@ -254,6 +256,8 @@ gap_event_cb(struct ble_gap_event *event, void *arg)
     case BLE_GAP_EVENT_SUBSCRIBE:
         if (event->subscribe.attr_handle == lns_las_handle) {
             lns_las_notify = event->subscribe.cur_notify;
+        } else if (event->subscribe.attr_handle == chr_tx_handle) {
+            nuart_tx_notify = event->subscribe.cur_notify;
         }
         break;
 
@@ -357,6 +361,10 @@ blesvc_rx_byte(uint8_t byte)
     static uint8_t buf[20];
     static uint8_t len = 0;
     struct os_mbuf *om;
+
+    if (!nuart_tx_notify) {
+        goto done;
+    }
 
     buf[len++] = byte;
 
