@@ -208,29 +208,37 @@ draw_signal_bar(const struct gps_sat_info *gsi, int max)
     }
 }
 
-static const char *
-get_ble_state_str(void)
+static void
+print_ble_state(int index)
 {
+    const char *state = "??";
+    int8_t rssi;
+
     if (blesvc_get_conn_handle() == 0xFFFF) {
-        return "--";
+        oled_printfln(index, "\xff not connected");
+        return;
     }
 
     switch (blesvc_get_conn_phy()) {
     case BLE_GAP_LE_PHY_1M:
-        return "1M";
+        state = "1M";
+        break;
     case BLE_GAP_LE_PHY_2M:
-        return "2M";
+        state = "2M";
+        break;
     case BLE_GAP_LE_PHY_CODED:
-        return "LR";
+        state = "LR";
+        break;
     }
 
-    return "??";
+    ble_gap_conn_rssi(blesvc_get_conn_handle(), &rssi);
+
+    oled_printfln(index, "\xff %s         %4d dBm", state, (int) rssi);
 }
 
 static void
 update_oled(void)
 {
-    int8_t rssi;
     int deg, min, tsec, dir;
     int i;
 
@@ -250,15 +258,10 @@ update_oled(void)
         oled_printfln(1, "--\xf8--'--.-\" -");
     }
 
-    oled_printfln(2, "%02d:%02d:%02d UTC     \xff %s", gps_info.time.hours,
-                  gps_info.time.minutes, gps_info.time.seconds,
-                  get_ble_state_str());
+    oled_printfln(2, "%02d:%02d:%02d UTC", gps_info.time.hours,
+                  gps_info.time.minutes, gps_info.time.seconds);
 
-    if (!ble_gap_conn_rssi(blesvc_get_conn_handle(), &rssi)) {
-        oled_printfln(3, "             %4d dBm", (int) rssi);
-    } else {
-        oled_printfln(3, "               -- dBm");
-    }
+    print_ble_state(3);
 
     oled_printfln(5, "sat %d/%d", gps_info.sat_tracked, gps_info.sat_total);
 
