@@ -230,6 +230,7 @@ get_ble_state_str(void)
 static void
 update_oled(void)
 {
+    int8_t rssi;
     int deg, min, tsec, dir;
     int i;
 
@@ -252,6 +253,12 @@ update_oled(void)
     oled_printfln(2, "%02d:%02d:%02d UTC     \xff %s", gps_info.time.hours,
                   gps_info.time.minutes, gps_info.time.seconds,
                   get_ble_state_str());
+
+    if (!ble_gap_conn_rssi(blesvc_get_conn_handle(), &rssi)) {
+        oled_printfln(3, "             %4d dBm", (int) rssi);
+    } else {
+        oled_printfln(3, "               -- dBm");
+    }
 
     oled_printfln(5, "sat %d/%d", gps_info.sat_tracked, gps_info.sat_total);
 
