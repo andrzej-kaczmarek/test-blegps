@@ -30,6 +30,8 @@
 #include "services/gap/ble_svc_gap.h"
 #include "gps.h"
 
+static const char gap_name[] = "blegps";
+
 #define LNS_LAS_FLAG_SPEED                      0x0001
 #define LNS_LAS_FLAG_DISTANCE                   0x0002
 #define LNS_LAS_FLAG_LOCATION                   0x0004
@@ -284,31 +286,63 @@ coord_to_loc(int32_t coord)
 }
 
 static void
+put_ad(uint8_t ad_type, uint8_t ad_len, const void *ad, uint8_t *buf,
+       uint8_t *len)
+{
+    buf[(*len)++] = ad_len + 1;
+    buf[(*len)++] = ad_type;
+
+    memcpy(&buf[*len], ad, ad_len);
+
+    *len += ad_len;
+}
+
+static void
+update_ad(void)
+{
+    static bool ad_init = false;
+    static uint8_t ad[BLE_HS_ADV_MAX_SZ];
+    static uint8_t ad_len = 0;
+    static uint8_t ad_flags = BLE_HS_ADV_F_DISC_GEN | BLE_HS_ADV_F_BREDR_UNSUP;
+    static uint16_t ad_uuid = htole16(LNS_UUID);
+    struct {
+        uint16_t uuid;
+        int32_t lat;
+        int32_t lon;
+    } __attribute__((packed)) ad_svcdata;
+    uint8_t len;
+
+    if (!ad_init) {
+        put_ad(BLE_HS_ADV_TYPE_FLAGS, 1, &ad_flags, ad, &ad_len);
+        put_ad(BLE_HS_ADV_TYPE_COMP_NAME, sizeof(gap_name), gap_name,
+               ad, &ad_len);
+        put_ad(BLE_HS_ADV_TYPE_INCOMP_UUIDS16, sizeof(ad_uuid), &ad_uuid,
+               ad, &ad_len);
+        ad_init = true;
+    }
+
+    len = ad_len;
+
+    if (gps_info.fix_quality) {
+        /* This is not defined by LNS spec! */
+        ad_svcdata.uuid = LNS_UUID;
+        ad_svcdata.lat = htole32(coord_to_loc(gps_info.lat));
+        ad_svcdata.lon = htole32(coord_to_loc(gps_info.lon));
+
+        put_ad(BLE_HS_ADV_TYPE_SVC_DATA_UUID16, sizeof(ad_svcdata), &ad_svcdata,
+               ad, &len);
+    }
+
+    ble_gap_adv_set_data(ad, len);
+}
+
+static void
 start_advertise(void)
 {
     struct ble_gap_adv_params advp;
-    struct ble_hs_adv_fields advf;
     int rc;
 
-    memset(&advf, 0, sizeof advf);
-    advf.flags = BLE_HS_ADV_F_DISC_GEN | BLE_HS_ADV_F_BREDR_UNSUP;
-    advf.uuids16 = (ble_uuid16_t[]) { BLE_UUID16_INIT(LNS_UUID) };
-    advf.num_uuids16 = 1;
-    advf.uuids16_is_complete = 1;
-    advf.uuids128 = (ble_uuid128_t *) &svc_uuid; /* const */
-    advf.num_uuids128 = 1;
-    advf.uuids128_is_complete = 1;
-
-    rc = ble_gap_adv_set_fields(&advf);
-    assert(rc == 0);
-
-    memset(&advf, 0, sizeof advf);
-    advf.name = (uint8_t *) ble_svc_gap_device_name();
-    advf.name_len = strlen((char *) advf.name);
-    advf.name_is_complete = 1;
-
-    rc = ble_gap_adv_rsp_set_fields(&advf);
-    assert(rc == 0);
+    update_ad();
 
     memset(&advp, 0, sizeof advp);
     advp.conn_mode = BLE_GAP_CONN_MODE_UND;
@@ -338,7 +372,7 @@ blesvc_setup(void)
     rc = ble_gatts_add_svcs(svc_def);
     assert(rc == 0);
 
-    rc = ble_svc_gap_device_name_set("blegps");
+    rc = ble_svc_gap_device_name_set(gap_name);
     assert(rc == 0);
 
     conn_handle = 0xffff;
@@ -400,6 +434,8 @@ void blesvc_notify(void)
     } __attribute__((packed)) pkt;
     int32_t elevation;
     struct os_mbuf *om;
+
+    update_ad();
 
     if (!lns_las_notify) {
         return;
